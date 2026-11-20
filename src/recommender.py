@@ -1,7 +1,9 @@
 """Reusable search and nearest-neighbor recommendation functions."""
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -53,6 +55,11 @@ def search_songs(songs: pd.DataFrame, query: str, limit: int = 30) -> pd.DataFra
     return songs.loc[title_match | artist_match].head(max(1, int(limit))).copy()
 
 
+def _display_key(name: Any, artists: Any) -> tuple[str, str]:
+    """Normalize visible track metadata for duplicate-result detection."""
+    return str(name).strip().casefold(), str(artists).strip().casefold()
+
+
 def recommend_by_index(
     track_index: int,
     songs: pd.DataFrame,
@@ -61,8 +68,9 @@ def recommend_by_index(
     top_n: int = 10,
     exclude_same_artist: bool = False,
 ) -> pd.DataFrame:
-    """Retrieve nearest tracks by Euclidean distance in standardized feature space.
+    """Retrieve unique nearest tracks by Euclidean distance in standardized feature space.
 
+    Duplicate visible (track title, artist) records are returned only once.
     A lower feature distance means closer numeric audio-feature vectors. It is not
     a probability, accuracy percentage, or a guarantee of listener preference.
     """
@@ -72,30 +80,56 @@ def recommend_by_index(
         return pd.DataFrame(columns=["name", "artists", "spotify_id", "feature_distance"])
 
     top_n = max(1, min(int(top_n), len(songs) - 1))
-    request_count = len(songs) if exclude_same_artist else min(len(songs), top_n + 1)
-    query = scaled_features[int(track_index)].reshape(1, -1)
-    distances, indices = neighbor_model.kneighbors(query, n_neighbors=request_count)
+    query_index = int(track_index)
+    target = songs.iloc[query_index]
+    target_artist = str(target["artists"]).strip().casefold()
 
-    target_artist = str(songs.iloc[int(track_index)]["artists"])
+    # Start with a small neighborhood and expand only when duplicate rows or
+    # same-artist filtering leave too few unique recommendations.
+    request_count = min(len(songs), max(2, top_n + 1))
+    seen_display_records = {_display_key(target["name"], target["artists"])}
     rows: list[dict[str, Any]] = []
-    seen_display_records: set[tuple[str, str]] = set()
-    for distance, candidate_idx in zip(distances[0], indices[0]):
-        candidate_idx = int(candidate_idx)
-        if candidate_idx == int(track_index):
-            continue
-        candidate = songs.iloc[candidate_idx]
-        if exclude_same_artist and str(candidate["artists"]) == target_artist:
-            continue
-        spotify_id = candidate.get("spotify_id")
-        rows.append({
-            "name": str(candidate["name"]),
-            "artists": str(candidate["artists"]),
-            "spotify_id": None if pd.isna(spotify_id) else str(spotify_id),
-            "feature_distance": float(distance),
-        })
-        if len(rows) >= top_n:
+
+    while True:
+        distances, indices = neighbor_model.kneighbors(
+            scaled_features[query_index].reshape(1, -1),
+            n_neighbors=request_count,
+        )
+
+        for distance, candidate_idx in zip(distances[0], indices[0]):
+            candidate_idx = int(candidate_idx)
+            if candidate_idx == query_index:
+                continue
+
+            candidate = songs.iloc[candidate_idx]
+            candidate_artist = str(candidate["artists"]).strip().casefold()
+            if exclude_same_artist and candidate_artist == target_artist:
+                continue
+
+            display_key = _display_key(candidate["name"], candidate["artists"])
+            if display_key in seen_display_records:
+                continue
+
+            seen_display_records.add(display_key)
+            spotify_id = candidate.get("spotify_id")
+            rows.append({
+                "name": str(candidate["name"]),
+                "artists": str(candidate["artists"]),
+                "spotify_id": None if pd.isna(spotify_id) else str(spotify_id),
+                "feature_distance": float(distance),
+            })
+            if len(rows) >= top_n:
+                break
+
+        if len(rows) >= top_n or request_count >= len(songs):
             break
-    return pd.DataFrame(rows, columns=["name", "artists", "spotify_id", "feature_distance"])
+
+        request_count = min(len(songs), max(request_count + 1, request_count * 2))
+
+    return pd.DataFrame(
+        rows,
+        columns=["name", "artists", "spotify_id", "feature_distance"],
+    )
 
 
 def closest_feature_dimensions(
