@@ -2,7 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.neighbors import NearestNeighbors
-from src.recommender import search_songs, recommend_by_index, closest_feature_dimensions
+
+from src.recommender import (
+    search_songs,
+    recommend_by_index,
+    closest_feature_dimensions,
+)
 
 
 def sample_objects():
@@ -34,8 +39,50 @@ def test_recommend_excludes_query_and_sorts_by_distance():
 
 def test_recommend_can_exclude_same_artist():
     songs, vectors, model = sample_objects()
-    result = recommend_by_index(0, songs, vectors, model, top_n=2, exclude_same_artist=True)
+    result = recommend_by_index(
+        0, songs, vectors, model, top_n=2, exclude_same_artist=True
+    )
     assert all(artist != "Artist 1" for artist in result["artists"])
+
+
+def test_duplicate_title_artist_records_are_returned_only_once():
+    songs = pd.DataFrame({
+        "name": ["Query", "Repeated Song", "Repeated Song", "Unique B", "Unique C"],
+        "artists": ["Artist Q", "Artist R", "Artist R", "Artist S", "Artist T"],
+        "spotify_id": ["q", "r1", "r2", "b", "c"],
+    })
+    vectors = np.array([
+        [0.0, 0.0],
+        [0.01, 0.01],
+        [0.02, 0.02],
+        [0.10, 0.10],
+        [0.20, 0.20],
+    ])
+    model = NearestNeighbors(metric="euclidean").fit(vectors)
+
+    result = recommend_by_index(0, songs, vectors, model, top_n=3)
+
+    visible_keys = list(zip(result["name"], result["artists"]))
+    assert len(visible_keys) == len(set(visible_keys))
+    assert len(result) == 3
+    assert result.iloc[0]["name"] == "Repeated Song"
+
+
+def test_duplicate_query_record_is_not_recommended():
+    songs = pd.DataFrame({
+        "name": ["Same Song", "Same Song", "Another Song"],
+        "artists": ["Same Artist", "Same Artist", "Other Artist"],
+        "spotify_id": ["id-1", "id-2", "id-3"],
+    })
+    vectors = np.array([[0.0, 0.0], [0.01, 0.01], [0.5, 0.5]])
+    model = NearestNeighbors(metric="euclidean").fit(vectors)
+
+    result = recommend_by_index(0, songs, vectors, model, top_n=2)
+
+    assert not (
+        (result["name"] == "Same Song") & (result["artists"] == "Same Artist")
+    ).any()
+    assert result.iloc[0]["name"] == "Another Song"
 
 
 def test_invalid_track_index_raises():
